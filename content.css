@@ -1,0 +1,167 @@
+html[data-cgpt-width-enabled="true"] {
+  --cgpt-width: 72vw;
+}
+
+html[data-cgpt-width-enabled="true"] main :is(
+  .max-w-2xl,
+  .max-w-3xl,
+  .max-w-4xl,
+  .max-w-5xl,
+  [class*="max-w-2xl"],
+  [class*="max-w-3xl"],
+  [class*="max-w-4xl"],
+  [class*="max-w-5xl"]
+) {
+  max-width: min(var(--cgpt-width), calc(100vw - 32px)) !important;
+}
+
+html[data-cgpt-width-enabled="true"] main :is(
+  article,
+  [data-testid^="conversation-turn"],
+  [data-message-author-role]
+) {
+  --thread-content-max-width: min(var(--cgpt-width), calc(100vw - 32px)) !important;
+}
+
+#cgpt-width-slider-panel {
+  position: fixed;
+  left: 20px;
+  top: 20px;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 304px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 14px;
+  background: rgba(24, 24, 27, 0.88);
+  color: #fff;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(12px);
+  font: 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  user-select: none;
+  touch-action: none;
+}
+
+#cgpt-width-slider-panel[data-collapsed="true"] {
+  width: auto;
+  padding: 8px;
+}
+
+#cgpt-width-slider-panel[data-collapsed="true"] .cgpt-width-body {
+  display: none;
+}
+
+#cgpt-width-slider-panel .cgpt-panel-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(16, 163, 127, 0.95), rgba(67, 56, 202, 0.92));
+  color: #fff;
+  cursor: grab;
+  font: inherit;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 6px 14px rgba(0, 0, 0, 0.18);
+}
+
+#cgpt-width-slider-panel .cgpt-panel-handle:hover {
+  filter: brightness(1.08);
+}
+
+#cgpt-width-slider-panel[data-dragging="true"] .cgpt-panel-handle {
+  cursor: grabbing;
+}
+
+#cgpt-width-slider-panel svg {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.9;
+}
+
+#cgpt-width-slider-panel svg path:nth-child(5) {
+  fill: currentColor;
+  stroke-width: 0;
+}
+
+.cgpt-width-body {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+
+.cgpt-width-label {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.cgpt-width-value {
+  font-variant-numeric: tabular-nums;
+}
+
+#cgpt-width-range {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: #fff;
+  cursor: pointer;
+  touch-action: auto;
+}
+
+.cgpt-latex-copy-target {
+  cursor: copy !important;
+  border-radius: 6px;
+  transition: outline-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.cgpt-latex-copy-target:hover {
+  background: rgba(16, 163, 127, 0.08);
+  outline: 1px dashed rgba(16, 163, 127, 0.55);
+  outline-offset: 3px;
+}
+
+.cgpt-latex-copy-ok {
+  background: rgba(16, 163, 127, 0.14) !important;
+  outline: 2px solid rgba(16, 163, 127, 0.9) !important;
+  outline-offset: 4px !important;
+}
+
+.cgpt-latex-copy-fail {
+  background: rgba(220, 38, 38, 0.12) !important;
+  outline: 2px solid rgba(220, 38, 38, 0.88) !important;
+  outline-offset: 4px !important;
+}
+
+.cgpt-copy-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  z-index: 2147483647;
+  transform: translateX(-50%);
+  padding: 9px 13px;
+  border-radius: 999px;
+  background: rgba(24, 24, 27, 0.9);
+  color: #fff;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  font: 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  pointer-events: none;
+}
+
+@media (max-width: 700px) {
+  #cgpt-width-slider-panel {
+    width: min(304px, calc(100vw - 24px));
+  }
+}
