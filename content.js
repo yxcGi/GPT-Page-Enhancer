@@ -7,12 +7,17 @@
   const PANEL_POSITION_KEY = "chatgptEnhancerPanelPosition";
   const PANEL_MARGIN = 12;
   const FORMULA_SELECTOR = ".katex-display, .katex, .MathJax, mjx-container, [data-latex]";
+  const USER_MESSAGE_SELECTOR = "[data-message-author-role='user']";
+  const MAX_MARKDOWN_SOURCE_LENGTH = 20000;
 
   let widthPercent = DEFAULT_PERCENT;
   let collapsed = false;
   let panelPosition = null;
   let observer = null;
   let refreshTimer = null;
+  let widthStorageTimer = null;
+  let pendingFullRefresh = false;
+  const dirtyRefreshRoots = new Set();
 
   const storage = chrome.storage && chrome.storage.sync ? chrome.storage.sync : chrome.storage.local;
 
@@ -28,12 +33,23 @@
     document.documentElement.style.setProperty("--cgpt-width", `${widthPercent}vw`);
     document.documentElement.style.setProperty("--thread-content-max-width", `${widthPercent}vw`);
     updatePanelValue();
-    scheduleRefresh();
+  }
+
+  function persistWidthSoon() {
+    window.clearTimeout(widthStorageTimer);
+    widthStorageTimer = window.setTimeout(() => {
+      storage.set({ [STORAGE_KEY]: widthPercent });
+    }, 180);
+  }
+
+  function persistWidthNow() {
+    window.clearTimeout(widthStorageTimer);
+    storage.set({ [STORAGE_KEY]: widthPercent });
   }
 
   function saveWidth(value) {
     setRootWidth(value);
-    storage.set({ [STORAGE_KEY]: widthPercent });
+    persistWidthSoon();
   }
 
   function clampPanelPosition(left, top, panel) {
@@ -94,21 +110,39 @@
     const className = typeof element.className === "string" ? element.className : "";
     const inlineMaxWidth = element.style && element.style.maxWidth;
     return (
-      /\bmax-w-(2xl|3xl|4xl|5xl|6xl|7xl)\b/.test(className) ||
-      className.includes("max-w-[") ||
+      /\bmax-w-/.test(className) ||
       inlineMaxWidth.includes("rem") ||
       inlineMaxWidth.includes("px")
     );
   }
 
   function widenElement(element) {
-    element.style.setProperty("max-width", `min(${widthPercent}vw, calc(100vw - 32px))`, "important");
+    element.style.setProperty("max-width", "min(var(--cgpt-width), calc(100vw - 32px))", "important");
   }
 
-  function refreshChatWidths() {
-    const main = document.querySelector("main");
-    if (!main) return;
+  function normalizeRefreshRoots(roots) {
+    if (!roots) {
+      const main = document.querySelector("main");
+      return main ? [main] : [];
+    }
+    const list = Array.isArray(roots) ? roots : [roots];
+    return list.filter((root) => root && (root.nodeType === Node.ELEMENT_NODE || root.nodeType === Node.DOCUMENT_NODE));
+  }
 
+  function collectScopedElements(roots, selector) {
+    const candidates = new Set();
+    for (const root of normalizeRefreshRoots(roots)) {
+      if (root instanceof Element && root.matches(selector)) {
+        candidates.add(root);
+      }
+      for (const element of root.querySelectorAll(selector)) {
+        candidates.add(element);
+      }
+    }
+    return candidates;
+  }
+
+  function refreshChatWidths(roots) {
     const candidates = new Set();
     for (const selector of [
         ".max-w-2xl",
@@ -117,11 +151,12 @@
         ".max-w-5xl",
         ".max-w-6xl",
         ".max-w-7xl",
-        "[class]",
+        "[class*='max-w-']",
+        "[style*='max-width']",
         "[data-testid^='conversation-turn']",
         "[data-message-author-role]"
       ]) {
-      for (const element of main.querySelectorAll(selector)) {
+      for (const element of collectScopedElements(roots, selector)) {
         candidates.add(element);
       }
     }
@@ -129,7 +164,7 @@
     for (const element of candidates) {
       if (shouldWiden(element)) widenElement(element);
       if (element instanceof HTMLElement) {
-        element.style.setProperty("--thread-content-max-width", `${widthPercent}vw`, "important");
+        element.style.setProperty("--thread-content-max-width", "min(var(--cgpt-width), calc(100vw - 32px))", "important");
       }
     }
   }
@@ -146,6 +181,7 @@
 
     const block = Boolean(
       formula.closest(".katex-display, mjx-container[display='true'], .MathJax_Display") ||
+      formula.closest(".cgpt-user-math.is-block") ||
       formula.getAttribute("display") === "true"
     );
 
@@ -226,19 +262,454 @@
     window.setTimeout(() => toast.remove(), 1100);
   }
 
-  function refreshLatexTargets() {
-    for (const element of document.querySelectorAll(".cgpt-latex-copy-target")) {
-      element.classList.remove("cgpt-latex-copy-target");
-      element.removeAttribute("title");
-    }
-
-    const formulas = document.querySelectorAll(".katex, .MathJax, mjx-container, [data-latex]");
-    for (const formula of formulas) {
+  function refreshLatexTargets(roots) {
+    for (const formula of collectScopedElements(roots, ".katex, .MathJax, mjx-container, [data-latex]")) {
       if (!(formula instanceof HTMLElement)) continue;
       if (!isChatSurfaceElement(formula)) continue;
-      if (!getLatexFromElement(formula)) continue;
+      if (formula.classList.contains("cgpt-latex-copy-target")) continue;
+      if (!getLatexFromFormula(formula)) continue;
       formula.classList.add("cgpt-latex-copy-target");
       formula.title = "点击复制完整 LaTeX";
+    }
+  }
+
+  function escapeHtml(text) {
+    return String(text)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function getSafeHref(url) {
+    const value = url.trim();
+    if (/^(https?:|mailto:|#|\/)/i.test(value)) return value;
+    return "";
+  }
+
+  function renderInlineStyles(text) {
+    return escapeHtml(text)
+      .replace(/(\*\*|__)(.+?)\1/g, "<strong>$2</strong>")
+      .replace(/(^|[^\*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      .replace(/(^|[^_])_([^_\n]+)_/g, "$1<em>$2</em>");
+  }
+
+  function mathMlElement(tag, content) {
+    return `<${tag}>${content}</${tag}>`;
+  }
+
+  function readLatexGroup(text, index) {
+    if (text[index] !== "{") return null;
+    let depth = 0;
+    for (let cursor = index; cursor < text.length; cursor += 1) {
+      if (text[cursor] === "{") depth += 1;
+      if (text[cursor] === "}") depth -= 1;
+      if (depth === 0) {
+        return {
+          value: text.slice(index + 1, cursor),
+          next: cursor + 1
+        };
+      }
+    }
+    return null;
+  }
+
+  function commandToMathMl(command) {
+    const greek = {
+      alpha: "α",
+      beta: "β",
+      gamma: "γ",
+      delta: "δ",
+      epsilon: "ϵ",
+      theta: "θ",
+      lambda: "λ",
+      mu: "μ",
+      pi: "π",
+      rho: "ρ",
+      sigma: "σ",
+      tau: "τ",
+      phi: "φ",
+      omega: "ω",
+      Delta: "Δ",
+      Gamma: "Γ",
+      Lambda: "Λ",
+      Omega: "Ω",
+      Phi: "Φ",
+      Pi: "Π",
+      Sigma: "Σ",
+      Theta: "Θ"
+    };
+    const operators = {
+      cdot: "·",
+      times: "×",
+      div: "÷",
+      le: "≤",
+      leq: "≤",
+      ge: "≥",
+      geq: "≥",
+      neq: "≠",
+      approx: "≈",
+      infty: "∞",
+      pm: "±",
+      to: "→",
+      rightarrow: "→",
+      leftarrow: "←"
+    };
+
+    if (["left", "right", "big", "Big", "bigl", "bigr", "Bigl", "Bigr"].includes(command)) return "";
+    if (greek[command]) return mathMlElement("mi", greek[command]);
+    if (operators[command]) return mathMlElement("mo", operators[command]);
+    return mathMlElement("mi", escapeHtml(command));
+  }
+
+  function parseLatexAtom(text, index) {
+    if (index >= text.length) return { html: "", next: index };
+    const char = text[index];
+
+    if (char === "{") {
+      const group = readLatexGroup(text, index);
+      if (!group) return { html: mathMlElement("mo", "{"), next: index + 1 };
+      return {
+        html: parseLatexToMathMl(group.value),
+        next: group.next
+      };
+    }
+
+    if (char === "\\") {
+      const commandMatch = text.slice(index + 1).match(/^[A-Za-z]+/);
+      if (!commandMatch) {
+        return { html: mathMlElement("mo", escapeHtml(text[index + 1] || "\\")), next: index + 2 };
+      }
+
+      const command = commandMatch[0];
+      let next = index + command.length + 1;
+
+      if (command === "frac") {
+        const numerator = readLatexGroup(text, next);
+        const denominator = numerator ? readLatexGroup(text, numerator.next) : null;
+        if (numerator && denominator) {
+          return {
+            html: `<mfrac>${parseLatexToMathMl(numerator.value)}${parseLatexToMathMl(denominator.value)}</mfrac>`,
+            next: denominator.next
+          };
+        }
+      }
+
+      if (command === "sqrt") {
+        const radicand = readLatexGroup(text, next);
+        if (radicand) {
+          return {
+            html: `<msqrt>${parseLatexToMathMl(radicand.value)}</msqrt>`,
+            next: radicand.next
+          };
+        }
+      }
+
+      return {
+        html: commandToMathMl(command),
+        next
+      };
+    }
+
+    if (/[A-Za-z]/.test(char)) return { html: mathMlElement("mi", escapeHtml(char)), next: index + 1 };
+    if (/[0-9]/.test(char)) return { html: mathMlElement("mn", escapeHtml(char)), next: index + 1 };
+    if (/\s/.test(char)) return { html: "", next: index + 1 };
+    return { html: mathMlElement("mo", escapeHtml(char)), next: index + 1 };
+  }
+
+  function parseLatexToMathMl(text) {
+    const nodes = [];
+    let index = 0;
+
+    while (index < text.length) {
+      let atom = parseLatexAtom(text, index);
+      index = atom.next;
+
+      if (text[index] === "_" || text[index] === "^") {
+        const firstOperator = text[index];
+        const firstScript = parseLatexAtom(text, index + 1);
+        index = firstScript.next;
+
+        if (text[index] === "_" || text[index] === "^") {
+          const secondOperator = text[index];
+          const secondScript = parseLatexAtom(text, index + 1);
+          index = secondScript.next;
+
+          const sub = firstOperator === "_" ? firstScript.html : secondScript.html;
+          const sup = firstOperator === "^" ? firstScript.html : secondScript.html;
+          atom = {
+            html: `<msubsup>${atom.html}${sub}${sup}</msubsup>`,
+            next: index
+          };
+        } else {
+          atom = {
+            html: firstOperator === "_" ? `<msub>${atom.html}${firstScript.html}</msub>` : `<msup>${atom.html}${firstScript.html}</msup>`,
+            next: index
+          };
+        }
+      }
+
+      nodes.push(atom.html);
+    }
+
+    return nodes.join("");
+  }
+
+  function renderLatexMath(latex, block) {
+    const cleanLatex = stripLatexWrapper(latex);
+    const wrappedLatex = wrapLatex(cleanLatex, block);
+    const tag = block ? "div" : "span";
+    const math = `<math xmlns="http://www.w3.org/1998/Math/MathML" display="${block ? "block" : "inline"}">${parseLatexToMathMl(cleanLatex)}</math>`;
+    return `<${tag} class="cgpt-user-math ${block ? "is-block" : "is-inline"}" data-latex="${escapeHtml(wrappedLatex)}">${math}</${tag}>`;
+  }
+
+  function renderInlineMathAndStyles(text) {
+    const parts = [];
+    let cursor = 0;
+    const mathPattern = /(^|[^\\])\$([^$\n]+?)\$/g;
+    let mathMatch;
+
+    while ((mathMatch = mathPattern.exec(text))) {
+      const start = mathMatch.index + mathMatch[1].length;
+      if (start > cursor) {
+        parts.push(renderInlineStyles(text.slice(cursor, start)));
+      }
+      parts.push(renderLatexMath(mathMatch[2], false));
+      cursor = mathPattern.lastIndex;
+    }
+
+    if (cursor < text.length) {
+      parts.push(renderInlineStyles(text.slice(cursor)));
+    }
+
+    return parts.join("");
+  }
+
+  function renderInlineMarkdown(text) {
+    const parts = [];
+    let cursor = 0;
+    const codePattern = /(`+)([\s\S]*?)\1/g;
+    let codeMatch;
+
+    while ((codeMatch = codePattern.exec(text))) {
+      if (codeMatch.index > cursor) {
+        parts.push(renderInlineMarkdownWithoutCode(text.slice(cursor, codeMatch.index)));
+      }
+      parts.push(`<code>${escapeHtml(codeMatch[2])}</code>`);
+      cursor = codePattern.lastIndex;
+    }
+
+    if (cursor < text.length) {
+      parts.push(renderInlineMarkdownWithoutCode(text.slice(cursor)));
+    }
+
+    return parts.join("");
+  }
+
+  function renderInlineMarkdownWithoutCode(text) {
+    const parts = [];
+    let cursor = 0;
+    const linkPattern = /\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+    let linkMatch;
+
+    while ((linkMatch = linkPattern.exec(text))) {
+      if (linkMatch.index > cursor) {
+        parts.push(renderInlineMathAndStyles(text.slice(cursor, linkMatch.index)));
+      }
+
+      const href = getSafeHref(linkMatch[2]);
+      const label = renderInlineMathAndStyles(linkMatch[1]);
+      parts.push(href ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${label}</a>` : label);
+      cursor = linkPattern.lastIndex;
+    }
+
+    if (cursor < text.length) {
+      parts.push(renderInlineMathAndStyles(text.slice(cursor)));
+    }
+
+    return parts.join("");
+  }
+
+  function isMarkdownBlockStart(line) {
+    return (
+      /^```/.test(line) ||
+      /^\$\$/.test(line) ||
+      /^#{1,6}\s+/.test(line) ||
+      /^>\s?/.test(line) ||
+      /^\s*[-*+]\s+/.test(line) ||
+      /^\s*\d+[.)]\s+/.test(line)
+    );
+  }
+
+  function renderList(lines, index, ordered) {
+    const items = [];
+    const pattern = ordered ? /^\s*\d+[.)]\s+(.*)$/ : /^\s*[-*+]\s+(.*)$/;
+
+    while (index < lines.length) {
+      const match = lines[index].match(pattern);
+      if (!match) break;
+      items.push(`<li>${renderInlineMarkdown(match[1])}</li>`);
+      index += 1;
+    }
+
+    return {
+      html: `<${ordered ? "ol" : "ul"}>${items.join("")}</${ordered ? "ol" : "ul"}>`,
+      index
+    };
+  }
+
+  function renderMarkdown(text) {
+    const lines = text.replace(/\r\n?/g, "\n").split("\n");
+    const blocks = [];
+    let index = 0;
+    let guard = 0;
+
+    while (index < lines.length && guard < lines.length + 100) {
+      guard += 1;
+      const line = lines[index];
+
+      if (!line.trim()) {
+        index += 1;
+        continue;
+      }
+
+      const fence = line.match(/^```\s*([A-Za-z0-9_-]+)?\s*$/);
+      if (fence) {
+        const codeLines = [];
+        index += 1;
+        while (index < lines.length && !/^```\s*$/.test(lines[index])) {
+          codeLines.push(lines[index]);
+          index += 1;
+        }
+        if (index < lines.length) index += 1;
+        const language = fence[1] ? ` data-language="${escapeHtml(fence[1])}"` : "";
+        blocks.push(`<pre${language}><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+        continue;
+      }
+
+      if (/^\$\$/.test(line)) {
+        const sameLineMath = line.match(/^\$\$\s*([\s\S]*?)\s*\$\$$/);
+        if (sameLineMath) {
+          blocks.push(renderLatexMath(sameLineMath[1], true));
+          index += 1;
+          continue;
+        }
+
+        if (/^\$\$\s*$/.test(line)) {
+          const mathLines = [];
+          index += 1;
+          while (index < lines.length && !/^\s*\$\$\s*$/.test(lines[index])) {
+            mathLines.push(lines[index]);
+            index += 1;
+          }
+          if (index < lines.length) index += 1;
+          blocks.push(renderLatexMath(mathLines.join("\n"), true));
+          continue;
+        }
+
+        blocks.push(`<p>${renderInlineMarkdown(line)}</p>`);
+        index += 1;
+        continue;
+      }
+
+      const heading = line.match(/^(#{1,6})\s+(.+)$/);
+      if (heading) {
+        const level = heading[1].length;
+        blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+        index += 1;
+        continue;
+      }
+
+      if (/^>\s?/.test(line)) {
+        const quoteLines = [];
+        while (index < lines.length && /^>\s?/.test(lines[index])) {
+          quoteLines.push(lines[index].replace(/^>\s?/, ""));
+          index += 1;
+        }
+        blocks.push(`<blockquote>${renderMarkdown(quoteLines.join("\n"))}</blockquote>`);
+        continue;
+      }
+
+      if (/^\s*[-*+]\s+/.test(line)) {
+        const result = renderList(lines, index, false);
+        blocks.push(result.html);
+        index = result.index;
+        continue;
+      }
+
+      if (/^\s*\d+[.)]\s+/.test(line)) {
+        const result = renderList(lines, index, true);
+        blocks.push(result.html);
+        index = result.index;
+        continue;
+      }
+
+      const paragraph = [];
+      while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines[index])) {
+        paragraph.push(lines[index]);
+        index += 1;
+      }
+      if (!paragraph.length) {
+        blocks.push(`<p>${renderInlineMarkdown(line)}</p>`);
+        index += 1;
+        continue;
+      }
+      blocks.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
+    }
+
+    return blocks.join("");
+  }
+
+  function looksLikeTextMessageTarget(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    if (element.closest("textarea, input, [contenteditable='true']")) return false;
+    if (element.querySelector("button, textarea, input, select, img, video, canvas, table")) return false;
+    if (element.matches("pre, code") || element.closest("pre, code")) return false;
+
+    const text = element.textContent || "";
+    if (!text.trim()) return false;
+
+    const elementChildren = Array.from(element.children).filter((child) => child.tagName !== "BR");
+    if (element.dataset.cgptMarkdownRendered === "true") return true;
+    return elementChildren.length <= 1;
+  }
+
+  function findUserMessageTextTarget(message) {
+    const preferredSelectors = [
+      ".whitespace-pre-wrap",
+      "[class*='whitespace-pre-wrap']",
+      "[class*='break-words']"
+    ];
+
+    for (const selector of preferredSelectors) {
+      for (const element of message.querySelectorAll(selector)) {
+        if (looksLikeTextMessageTarget(element)) return element;
+      }
+    }
+
+    return looksLikeTextMessageTarget(message) ? message : null;
+  }
+
+  function refreshUserMarkdown(roots) {
+    for (const message of collectScopedElements(roots, USER_MESSAGE_SELECTOR)) {
+      const target = findUserMessageTextTarget(message);
+      if (!target) continue;
+
+      const source = target.dataset.cgptMarkdownSource || target.textContent || "";
+      if (!source.trim()) continue;
+      if (target.dataset.cgptMarkdownRendered === "true" && target.dataset.cgptMarkdownSource === source) continue;
+      if (source.length > MAX_MARKDOWN_SOURCE_LENGTH) continue;
+
+      target.dataset.cgptMarkdownSource = source;
+      target.dataset.cgptMarkdownRendered = "true";
+      target.classList.add("cgpt-user-markdown");
+      try {
+        target.innerHTML = renderMarkdown(source);
+      } catch (error) {
+        target.textContent = source;
+        target.dataset.cgptMarkdownRendered = "false";
+      }
     }
   }
 
@@ -372,7 +843,31 @@
     return root ? serializeRangeNode(root, range, state) : "";
   }
 
+  function rangeContainsFormula(range) {
+    const commonFormula = getClosestFormula(range.commonAncestorContainer);
+    if (formulaTouchesRange(commonFormula, range)) return true;
+
+    const root = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+      ? range.commonAncestorContainer
+      : range.commonAncestorContainer.parentElement;
+
+    if (!root) return false;
+    for (const formula of collectScopedElements(root, FORMULA_SELECTOR)) {
+      if (formulaTouchesRange(formula, range)) return true;
+    }
+    return false;
+  }
+
   function getSelectionTextWithLatex(selection) {
+    let hasFormulaRange = false;
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      if (rangeContainsFormula(selection.getRangeAt(index))) {
+        hasFormulaRange = true;
+        break;
+      }
+    }
+    if (!hasFormulaRange) return null;
+
     const state = {
       hasFormula: false,
       seenFormulas: new Set()
@@ -391,11 +886,59 @@
     return normalizeCopiedText(text);
   }
 
-  function scheduleRefresh() {
+  function isExtensionElement(element) {
+    return Boolean(
+      element &&
+      element.closest &&
+      element.closest("#cgpt-width-slider-panel, .cgpt-copy-toast")
+    );
+  }
+
+  function getRefreshRootFromNode(node) {
+    const element = node instanceof Element ? node : node && node.parentElement;
+    if (!element || isExtensionElement(element)) return null;
+    const main = element.closest("main");
+    if (!main) return null;
+    return (
+      element.closest("[data-message-author-role]") ||
+      element.closest("[data-testid^='conversation-turn']") ||
+      element.closest("article") ||
+      element
+    );
+  }
+
+  function queueMutationRoots(mutations) {
+    for (const mutation of mutations) {
+      const targetRoot = getRefreshRootFromNode(mutation.target);
+      if (targetRoot) dirtyRefreshRoots.add(targetRoot);
+
+      for (const node of mutation.addedNodes) {
+        const root = getRefreshRootFromNode(node);
+        if (root) dirtyRefreshRoots.add(root);
+      }
+    }
+  }
+
+  function scheduleRefresh(options = {}) {
+    if (options.full) {
+      pendingFullRefresh = true;
+      dirtyRefreshRoots.clear();
+    } else if (options.roots) {
+      for (const root of normalizeRefreshRoots(options.roots)) {
+        dirtyRefreshRoots.add(root);
+      }
+    }
+
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => {
-      refreshChatWidths();
-      refreshLatexTargets();
+      const roots = pendingFullRefresh ? null : Array.from(dirtyRefreshRoots);
+      pendingFullRefresh = false;
+      dirtyRefreshRoots.clear();
+
+      if (roots && !roots.length) return;
+      refreshChatWidths(roots);
+      refreshUserMarkdown(roots);
+      refreshLatexTargets(roots);
     }, 80);
   }
 
@@ -475,6 +1018,10 @@
     panel.querySelector("#cgpt-width-range").addEventListener("input", (event) => {
       saveWidth(event.target.value);
     });
+    panel.querySelector("#cgpt-width-range").addEventListener("change", (event) => {
+      setRootWidth(event.target.value);
+      persistWidthNow();
+    });
 
     document.documentElement.appendChild(panel);
     window.requestAnimationFrame(() => applyPanelPosition(panel, panelPosition));
@@ -483,7 +1030,10 @@
 
   function observePage() {
     if (observer) observer.disconnect();
-    observer = new MutationObserver(scheduleRefresh);
+    observer = new MutationObserver((mutations) => {
+      queueMutationRoots(mutations);
+      if (dirtyRefreshRoots.size) scheduleRefresh();
+    });
     observer.observe(document.documentElement, {
       childList: true,
       subtree: true
@@ -504,6 +1054,7 @@
         createPanel();
         observePage();
         refreshChatWidths();
+        refreshUserMarkdown();
         refreshLatexTargets();
       }
     );
@@ -542,7 +1093,7 @@
 
   chrome.runtime.onMessage.addListener((message) => {
     if (!message || message.type !== "CGPT_SET_WIDTH") return;
-    saveWidth(message.value);
+    setRootWidth(message.value);
   });
 
   init();

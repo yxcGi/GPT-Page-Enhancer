@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "GPT Page Enhancer",
-  "description": "Enhance ChatGPT pages with adjustable content width and click-to-copy LaTeX formulas.",
-  "version": "1.1.0",
+  "description": "Enhance ChatGPT pages with adjustable content width, Markdown prompts, and click-to-copy LaTeX formulas.",
+  "version": "1.2.0",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [
     "https://chatgpt.com/*",
