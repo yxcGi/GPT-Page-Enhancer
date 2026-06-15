@@ -7,6 +7,9 @@ const range = document.getElementById("width-range");
 const value = document.getElementById("width-value");
 const swatches = Array.from(document.querySelectorAll(".swatch"));
 const storage = chrome.storage && chrome.storage.sync ? chrome.storage.sync : chrome.storage.local;
+let widthStorageTimer = null;
+let widthMessageFrame = null;
+let pendingWidthMessage = DEFAULT_PERCENT;
 
 function updateDisplay(percent) {
   range.value = String(percent);
@@ -24,6 +27,23 @@ function sendToActiveTab(percent) {
       void chrome.runtime.lastError;
     });
   });
+}
+
+function queueWidthMessage(percent) {
+  pendingWidthMessage = percent;
+  if (widthMessageFrame) return;
+
+  widthMessageFrame = requestAnimationFrame(() => {
+    widthMessageFrame = null;
+    sendToActiveTab(pendingWidthMessage);
+  });
+}
+
+function saveWidth(percent) {
+  clearTimeout(widthStorageTimer);
+  widthStorageTimer = setTimeout(() => {
+    storage.set({ [STORAGE_KEY]: percent });
+  }, 180);
 }
 
 function sendBackgroundToActiveTab(background) {
@@ -54,6 +74,17 @@ storage.get({ [STORAGE_KEY]: DEFAULT_PERCENT, [BACKGROUND_KEY]: DEFAULT_BACKGROU
 range.addEventListener("input", () => {
   const percent = Number(range.value);
   updateDisplay(percent);
+  saveWidth(percent);
+  queueWidthMessage(percent);
+});
+
+range.addEventListener("change", () => {
+  const percent = Number(range.value);
+  clearTimeout(widthStorageTimer);
+  if (widthMessageFrame) {
+    cancelAnimationFrame(widthMessageFrame);
+    widthMessageFrame = null;
+  }
   storage.set({ [STORAGE_KEY]: percent });
   sendToActiveTab(percent);
 });

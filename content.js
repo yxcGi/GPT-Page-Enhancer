@@ -17,17 +17,42 @@
   const FORMULA_SELECTOR = ".katex-display, .katex, .MathJax, mjx-container, [data-latex]";
   const USER_MESSAGE_SELECTOR = "[data-message-author-role='user']";
   const MAX_MARKDOWN_SOURCE_LENGTH = 20000;
+  const WIDTH_SELECTOR = [
+    ".max-w-2xl",
+    ".max-w-3xl",
+    ".max-w-4xl",
+    ".max-w-5xl",
+    ".max-w-6xl",
+    ".max-w-7xl",
+    "[class*='max-w-']",
+    "[style*='max-width']",
+    "[data-testid^='conversation-turn']",
+    "[data-message-author-role]"
+  ].join(",");
   const PAGE_RENDER_REQUEST_EVENT = "CGPT_PAGE_RENDER_LATEX_REQUEST";
   const PAGE_RENDER_RESPONSE_EVENT = "CGPT_PAGE_RENDER_LATEX_RESPONSE";
-  const PAGE_RENDER_TIMEOUT_MS = 900;
+  const PAGE_RENDER_CAPABILITY_REQUEST_EVENT = "CGPT_PAGE_RENDER_LATEX_CAPABILITY_REQUEST";
+  const PAGE_RENDER_CAPABILITY_RESPONSE_EVENT = "CGPT_PAGE_RENDER_LATEX_CAPABILITY_RESPONSE";
+  const PAGE_RENDER_PROBE_TIMEOUT_MS = 350;
+  const PAGE_RENDER_RETRY_MS = 5000;
 
   let widthPercent = DEFAULT_PERCENT;
   let backgroundName = DEFAULT_BACKGROUND;
   let latexRenderId = 0;
+  let pageRendererProbeId = 0;
+  let pageRendererState = "unknown";
+  let pageRendererProbeTimer = null;
+  let lastPageRendererProbeAt = 0;
   let observer = null;
+  let observedRoot = null;
   let refreshTimer = null;
+  let resizeFrame = null;
   let pendingFullRefresh = false;
   const dirtyRefreshRoots = new Set();
+  const pendingPageRenderElements = new Set();
+  const pageRenderElements = new Map();
+  const markdownSourceCache = new WeakMap();
+  const formulaLatexCache = new WeakMap();
 
   const storage = chrome.storage && chrome.storage.sync ? chrome.storage.sync : chrome.storage.local;
 
@@ -99,7 +124,17 @@
   }
 
   function widenElement(element) {
+    if (element.dataset.cgptWidthMaxApplied === "true") return;
+    element.dataset.cgptWidthMaxApplied = "true";
+    element.classList.add("cgpt-width-max-target");
     element.style.setProperty("max-width", "min(var(--cgpt-width), calc(100vw - 32px))", "important");
+  }
+
+  function markThreadWidthElement(element) {
+    if (!(element instanceof HTMLElement) || element.dataset.cgptThreadWidthApplied === "true") return;
+    element.dataset.cgptThreadWidthApplied = "true";
+    element.classList.add("cgpt-thread-width-target");
+    element.style.setProperty("--thread-content-max-width", "min(var(--cgpt-width), calc(100vw - 32px))", "important");
   }
 
   function normalizeRefreshRoots(roots) {
@@ -125,33 +160,15 @@
   }
 
   function refreshChatWidths(roots) {
-    const candidates = new Set();
-    for (const selector of [
-        ".max-w-2xl",
-        ".max-w-3xl",
-        ".max-w-4xl",
-        ".max-w-5xl",
-        ".max-w-6xl",
-        ".max-w-7xl",
-        "[class*='max-w-']",
-        "[style*='max-width']",
-        "[data-testid^='conversation-turn']",
-        "[data-message-author-role]"
-      ]) {
-      for (const element of collectScopedElements(roots, selector)) {
-        candidates.add(element);
-      }
-    }
-
-    for (const element of candidates) {
+    for (const element of collectScopedElements(roots, WIDTH_SELECTOR)) {
       if (shouldWiden(element)) widenElement(element);
-      if (element instanceof HTMLElement) {
-        element.style.setProperty("--thread-content-max-width", "min(var(--cgpt-width), calc(100vw - 32px))", "important");
-      }
+      markThreadWidthElement(element);
     }
   }
 
   function getLatexFromFormula(formula) {
+    if (formulaLatexCache.has(formula)) return formulaLatexCache.get(formula);
+
     const annotation = formula.querySelector("annotation[encoding='application/x-tex']");
     const rawLatex =
       (formula instanceof HTMLElement ? formula.dataset.latex : "") ||
@@ -159,7 +176,10 @@
       formula.getAttribute("data-latex") ||
       (formula.matches(".MathJax, mjx-container") ? formula.getAttribute("aria-label") : "");
 
-    if (!rawLatex || !rawLatex.trim()) return null;
+    if (!rawLatex || !rawLatex.trim()) {
+      formulaLatexCache.set(formula, null);
+      return null;
+    }
 
     const block = Boolean(
       formula.closest(".katex-display, mjx-container[display='true'], .MathJax_Display") ||
@@ -167,10 +187,12 @@
       formula.getAttribute("display") === "true"
     );
 
-    return {
+    const latex = {
       element: formula,
       text: wrapLatex(rawLatex.trim(), block)
     };
+    formulaLatexCache.set(formula, latex);
+    return latex;
   }
 
   function resolveFormulaElement(node) {
@@ -526,13 +548,91 @@
     return nodes.join("");
   }
 
+  function renderFallbackMath(cleanLatex, block) {
+    return `<math xmlns="http://www.w3.org/1998/Math/MathML" display="${block ? "block" : "inline"}">${parseLatexToMathMl(cleanLatex)}</math>`;
+  }
+
   function renderLatexMath(latex, block) {
     const cleanLatex = stripLatexWrapper(latex);
     const wrappedLatex = wrapLatex(cleanLatex, block);
     const tag = block ? "div" : "span";
     const renderId = `cgpt-latex-${latexRenderId += 1}`;
-    const math = `<math xmlns="http://www.w3.org/1998/Math/MathML" display="${block ? "block" : "inline"}">${parseLatexToMathMl(cleanLatex)}</math>`;
+    const math = pageRendererState === "available" ?
+      `<span class="cgpt-user-math-placeholder">${escapeHtml(wrappedLatex)}</span>` :
+      renderFallbackMath(cleanLatex, block);
     return `<${tag} class="cgpt-user-math ${block ? "is-block" : "is-inline"}" data-latex="${escapeHtml(wrappedLatex)}" data-cgpt-latex-raw="${escapeHtml(cleanLatex)}" data-cgpt-latex-block="${block ? "true" : "false"}" data-cgpt-page-render-id="${renderId}" data-cgpt-page-render-status="pending">${math}</${tag}>`;
+  }
+
+  function setPendingPageRendersToFallback() {
+    for (const formula of pendingPageRenderElements) {
+      if (formula instanceof HTMLElement && formula.dataset.cgptPageRenderStatus === "pending") {
+        formula.dataset.cgptPageRenderStatus = "fallback";
+      }
+    }
+    pendingPageRenderElements.clear();
+  }
+
+  function dispatchPageLatexRender(formula) {
+    const id = formula.dataset.cgptPageRenderId;
+    const latex = formula.dataset.cgptLatexRaw;
+    if (!id || !latex) return;
+
+    pageRenderElements.set(id, formula);
+    formula.dataset.cgptPageRenderStatus = "requested";
+    window.dispatchEvent(new CustomEvent(PAGE_RENDER_REQUEST_EVENT, {
+      detail: {
+        id,
+        latex,
+        block: formula.dataset.cgptLatexBlock === "true"
+      }
+    }));
+  }
+
+  function flushPendingPageRenders() {
+    const formulas = Array.from(pendingPageRenderElements);
+    pendingPageRenderElements.clear();
+    for (const formula of formulas) {
+      if (formula instanceof HTMLElement && formula.dataset.cgptPageRenderStatus === "pending") {
+        dispatchPageLatexRender(formula);
+      }
+    }
+  }
+
+  function probePageRenderer() {
+    if (pageRendererState === "available" || pageRendererState === "probing") return;
+    const now = Date.now();
+    if (pageRendererState === "unavailable" && now - lastPageRendererProbeAt < PAGE_RENDER_RETRY_MS) return;
+
+    pageRendererState = "probing";
+    lastPageRendererProbeAt = now;
+    const id = `cgpt-render-probe-${pageRendererProbeId += 1}`;
+    window.clearTimeout(pageRendererProbeTimer);
+    pageRendererProbeTimer = window.setTimeout(() => {
+      if (pageRendererState !== "probing") return;
+      pageRendererState = "unavailable";
+      setPendingPageRendersToFallback();
+    }, PAGE_RENDER_PROBE_TIMEOUT_MS);
+
+    window.dispatchEvent(new CustomEvent(PAGE_RENDER_CAPABILITY_REQUEST_EVENT, {
+      detail: { id }
+    }));
+  }
+
+  function queuePageLatexRender(formula) {
+    if (!(formula instanceof HTMLElement)) return;
+
+    if (pageRendererState === "available") {
+      dispatchPageLatexRender(formula);
+      return;
+    }
+
+    formula.dataset.cgptPageRenderStatus = "pending";
+    pendingPageRenderElements.add(formula);
+    probePageRenderer();
+
+    if (pageRendererState === "unavailable") {
+      setPendingPageRendersToFallback();
+    }
   }
 
   function requestPageLatexRender(root) {
@@ -540,25 +640,7 @@
 
     const formulas = root.querySelectorAll(".cgpt-user-math[data-cgpt-page-render-status='pending']");
     for (const formula of formulas) {
-      if (!(formula instanceof HTMLElement)) continue;
-      const id = formula.dataset.cgptPageRenderId;
-      const latex = formula.dataset.cgptLatexRaw;
-      if (!id || !latex) continue;
-
-      formula.dataset.cgptPageRenderStatus = "requested";
-      window.dispatchEvent(new CustomEvent(PAGE_RENDER_REQUEST_EVENT, {
-        detail: {
-          id,
-          latex,
-          block: formula.dataset.cgptLatexBlock === "true"
-        }
-      }));
-
-      window.setTimeout(() => {
-        if (formula.dataset.cgptPageRenderStatus === "requested") {
-          formula.dataset.cgptPageRenderStatus = "fallback";
-        }
-      }, PAGE_RENDER_TIMEOUT_MS);
+      queuePageLatexRender(formula);
     }
   }
 
@@ -839,11 +921,13 @@
       const target = findUserMessageTextTarget(message);
       if (!target) continue;
 
-      const source = target.dataset.cgptMarkdownSource || target.textContent || "";
+      const cachedSource = markdownSourceCache.get(target) || target.dataset.cgptMarkdownSource || "";
+      const source = target.dataset.cgptMarkdownRendered === "true" && cachedSource ? cachedSource : target.textContent || "";
       if (!source.trim()) continue;
-      if (target.dataset.cgptMarkdownRendered === "true" && target.dataset.cgptMarkdownSource === source) continue;
+      if (target.dataset.cgptMarkdownRendered === "true" && cachedSource === source) continue;
       if (source.length > MAX_MARKDOWN_SOURCE_LENGTH) continue;
 
+      markdownSourceCache.set(target, source);
       target.dataset.cgptMarkdownSource = source;
       target.dataset.cgptMarkdownRendered = "true";
       target.classList.add("cgpt-user-markdown");
@@ -894,8 +978,8 @@
     return latex.text.startsWith("$$") ? `\n${latex.text}\n` : latex.text;
   }
 
-  function serializeFormulaOnce(formula, range, state) {
-    if (!formula || !formulaTouchesRange(formula, range)) return null;
+  function serializeFormulaElementOnce(formula, state) {
+    if (!formula) return null;
     if (state.seenFormulas.has(formula)) return "";
 
     const latex = getLatexFromFormula(formula);
@@ -906,21 +990,9 @@
     return formatFormulaForSelection(latex);
   }
 
-  function getSelectedTextFromTextNode(node, range) {
-    if (!nodeIntersectsRange(node, range)) return "";
-
-    let start = 0;
-    let end = node.nodeValue.length;
-
-    if (range.startContainer === node) {
-      start = range.startOffset;
-    }
-
-    if (range.endContainer === node) {
-      end = range.endOffset;
-    }
-
-    return node.nodeValue.slice(start, end);
+  function serializeFormulaOnce(formula, range, state) {
+    if (!formula || !formulaTouchesRange(formula, range)) return null;
+    return serializeFormulaElementOnce(formula, state);
   }
 
   function isBlockElement(element) {
@@ -944,31 +1016,31 @@
     ].includes(element.tagName);
   }
 
-  function serializeRangeNode(node, range, state) {
-    if (!nodeIntersectsRange(node, range)) return "";
-
-    const formulaText = serializeFormulaOnce(resolveFormulaElement(node), range, state);
+  function serializeClonedNode(node, state) {
+    const formulaText = node.nodeType === Node.ELEMENT_NODE ?
+      serializeFormulaElementOnce(resolveFormulaElement(node), state) :
+      null;
     if (formulaText !== null) return formulaText;
 
     if (node.nodeType === Node.TEXT_NODE) {
-      return getSelectedTextFromTextNode(node, range);
+      return node.nodeValue;
     }
 
-    if (node.nodeType !== Node.ELEMENT_NODE) {
+    if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) {
       return "";
     }
 
     const element = node;
-    if (element.tagName === "BR") {
+    if (element.nodeType === Node.ELEMENT_NODE && element.tagName === "BR") {
       return "\n";
     }
 
     let text = "";
-    for (const child of element.childNodes) {
-      text += serializeRangeNode(child, range, state);
+    for (const child of node.childNodes) {
+      text += serializeClonedNode(child, state);
     }
 
-    if (text.trim() && isBlockElement(element) && !text.endsWith("\n")) {
+    if (node.nodeType === Node.ELEMENT_NODE && text.trim() && isBlockElement(element) && !text.endsWith("\n")) {
       text += "\n";
     }
 
@@ -980,26 +1052,19 @@
     const formulaText = serializeFormulaOnce(commonFormula, range, state);
     if (formulaText !== null) return formulaText;
 
-    const root = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
-      ? range.commonAncestorContainer
-      : range.commonAncestorContainer.parentElement;
-
-    return root ? serializeRangeNode(root, range, state) : "";
+    return serializeClonedNode(range.cloneContents(), state);
   }
 
   function rangeContainsFormula(range) {
     const commonFormula = getClosestFormula(range.commonAncestorContainer);
     if (formulaTouchesRange(commonFormula, range)) return true;
 
-    const root = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
-      ? range.commonAncestorContainer
-      : range.commonAncestorContainer.parentElement;
-
-    if (!root) return false;
-    for (const formula of collectScopedElements(root, FORMULA_SELECTOR)) {
-      if (formulaTouchesRange(formula, range)) return true;
+    try {
+      const fragment = range.cloneContents();
+      return Boolean(fragment.querySelector && fragment.querySelector(FORMULA_SELECTOR));
+    } catch (error) {
+      return false;
     }
-    return false;
   }
 
   function getSelectionTextWithLatex(selection) {
@@ -1034,7 +1099,7 @@
     return Boolean(
       element &&
       element.closest &&
-      element.closest(".cgpt-copy-toast")
+      element.closest(".cgpt-copy-toast, .cgpt-user-math")
     );
   }
 
@@ -1075,7 +1140,7 @@
 
     window.clearTimeout(refreshTimer);
     refreshTimer = window.setTimeout(() => {
-      const roots = pendingFullRefresh ? null : Array.from(dirtyRefreshRoots);
+      const roots = pendingFullRefresh ? null : Array.from(dirtyRefreshRoots).filter((root) => root.isConnected !== false);
       pendingFullRefresh = false;
       dirtyRefreshRoots.clear();
 
@@ -1087,12 +1152,15 @@
   }
 
   function observePage() {
+    const root = document.querySelector("main") || document.body || document.documentElement;
+    if (observer && observedRoot === root) return;
     if (observer) observer.disconnect();
+    observedRoot = root;
     observer = new MutationObserver((mutations) => {
       queueMutationRoots(mutations);
       if (dirtyRefreshRoots.size) scheduleRefresh();
     });
-    observer.observe(document.documentElement, {
+    observer.observe(root, {
       childList: true,
       subtree: true
     });
@@ -1107,6 +1175,7 @@
       (items) => {
         setRootWidth(items[STORAGE_KEY]);
         setPageBackground(items[BACKGROUND_KEY]);
+        probePageRenderer();
         observePage();
         refreshChatWidths();
         refreshUserMarkdown();
@@ -1116,7 +1185,11 @@
   }
 
   window.addEventListener("resize", () => {
-    setRootWidth(widthPercent);
+    if (resizeFrame) return;
+    resizeFrame = window.requestAnimationFrame(() => {
+      resizeFrame = null;
+      setRootWidth(widthPercent);
+    });
   });
 
   document.addEventListener("click", async (event) => {
@@ -1147,14 +1220,30 @@
     event.clipboardData.setData("text/plain", copiedText);
   }
 
-  window.addEventListener("copy", handleCopyWithLatex, true);
   document.addEventListener("copy", handleCopyWithLatex, true);
+
+  window.addEventListener(PAGE_RENDER_CAPABILITY_RESPONSE_EVENT, (event) => {
+    const detail = event.detail || {};
+    if (detail.id !== `cgpt-render-probe-${pageRendererProbeId}`) return;
+
+    window.clearTimeout(pageRendererProbeTimer);
+    pageRendererProbeTimer = null;
+    pageRendererState = detail.ok ? "available" : "unavailable";
+
+    if (pageRendererState === "available") {
+      flushPendingPageRenders();
+      return;
+    }
+
+    setPendingPageRendersToFallback();
+  });
 
   window.addEventListener(PAGE_RENDER_RESPONSE_EVENT, (event) => {
     const detail = event.detail || {};
     if (!detail.id) return;
 
-    const formula = document.querySelector(`[data-cgpt-page-render-id="${detail.id}"]`);
+    const formula = pageRenderElements.get(detail.id) || document.querySelector(`[data-cgpt-page-render-id="${detail.id}"]`);
+    pageRenderElements.delete(detail.id);
     if (!(formula instanceof HTMLElement)) return;
 
     if (detail.ok && typeof detail.html === "string" && detail.html.trim()) {
@@ -1166,6 +1255,10 @@
       return;
     }
 
+    const latex = formula.dataset.cgptLatexRaw;
+    if (latex) {
+      formula.innerHTML = renderFallbackMath(latex, formula.dataset.cgptLatexBlock === "true");
+    }
     formula.dataset.cgptPageRenderStatus = "fallback";
   });
 
