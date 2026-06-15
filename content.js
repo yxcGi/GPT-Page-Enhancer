@@ -3,12 +3,27 @@
   const MIN_PERCENT = 45;
   const MAX_PERCENT = 96;
   const STORAGE_KEY = "chatgptContentWidthPercent";
+  const BACKGROUND_KEY = "chatgptPageBackground";
+  const DEFAULT_BACKGROUND = "default";
+  const BACKGROUNDS = {
+    default: "",
+    warm: "#fbf7ef",
+    mint: "#eef8f2",
+    blue: "#eef5ff",
+    gray: "#f4f4f5",
+    rose: "#fff1f2"
+  };
   const CONTENT_SIDE_GAP = 32;
   const FORMULA_SELECTOR = ".katex-display, .katex, .MathJax, mjx-container, [data-latex]";
   const USER_MESSAGE_SELECTOR = "[data-message-author-role='user']";
   const MAX_MARKDOWN_SOURCE_LENGTH = 20000;
+  const PAGE_RENDER_REQUEST_EVENT = "CGPT_PAGE_RENDER_LATEX_REQUEST";
+  const PAGE_RENDER_RESPONSE_EVENT = "CGPT_PAGE_RENDER_LATEX_RESPONSE";
+  const PAGE_RENDER_TIMEOUT_MS = 900;
 
   let widthPercent = DEFAULT_PERCENT;
+  let backgroundName = DEFAULT_BACKGROUND;
+  let latexRenderId = 0;
   let observer = null;
   let refreshTimer = null;
   let pendingFullRefresh = false;
@@ -47,6 +62,22 @@
     document.documentElement.dataset.cgptWidthEnabled = "true";
     document.documentElement.style.setProperty("--cgpt-width", widthValue);
     document.documentElement.style.setProperty("--thread-content-max-width", widthValue);
+  }
+
+  function normalizeBackground(value) {
+    return Object.prototype.hasOwnProperty.call(BACKGROUNDS, value) ? value : DEFAULT_BACKGROUND;
+  }
+
+  function setPageBackground(value) {
+    backgroundName = normalizeBackground(value);
+    document.documentElement.dataset.cgptBackground = backgroundName;
+
+    if (backgroundName === DEFAULT_BACKGROUND) {
+      document.documentElement.style.removeProperty("--cgpt-page-background");
+      return;
+    }
+
+    document.documentElement.style.setProperty("--cgpt-page-background", BACKGROUNDS[backgroundName]);
   }
 
   function isChatSurfaceElement(element) {
@@ -250,6 +281,26 @@
     return `<${tag}>${content}</${tag}>`;
   }
 
+  function mathMlRow(content) {
+    return `<mrow>${content}</mrow>`;
+  }
+
+  function mathMlGrouped(content) {
+    return mathMlRow(content || mathMlElement("mrow", ""));
+  }
+
+  function skipLatexWhitespace(text, index) {
+    let cursor = index;
+    while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
+    return cursor;
+  }
+
+  function safeMathColor(color) {
+    const value = color.trim();
+    if (/^[A-Za-z]+$/.test(value) || /^#[0-9A-Fa-f]{3,8}$/.test(value)) return value;
+    return "";
+  }
+
   function readLatexGroup(text, index) {
     if (text[index] !== "{") return null;
     let depth = 0;
@@ -314,6 +365,17 @@
     return mathMlElement("mi", escapeHtml(command));
   }
 
+  function renderMathcal(text) {
+    return mathMlRow(
+      Array.from(text).map((char) => {
+        if (/[A-Za-z]/.test(char)) return `<mi mathvariant="script">${escapeHtml(char)}</mi>`;
+        if (/[0-9]/.test(char)) return mathMlElement("mn", escapeHtml(char));
+        if (/\s/.test(char)) return "";
+        return mathMlElement("mo", escapeHtml(char));
+      }).join("")
+    );
+  }
+
   function parseLatexAtom(text, index) {
     if (index >= text.length) return { html: "", next: index };
     const char = text[index];
@@ -336,12 +398,45 @@
       const command = commandMatch[0];
       let next = index + command.length + 1;
 
+      if (command === "text") {
+        const group = readLatexGroup(text, next);
+        if (group) {
+          return {
+            html: mathMlElement("mtext", escapeHtml(group.value)),
+            next: group.next
+          };
+        }
+      }
+
+      if (command === "color") {
+        const color = readLatexGroup(text, next);
+        const body = color ? readLatexGroup(text, color.next) : null;
+        if (color && body) {
+          const mathColor = safeMathColor(color.value);
+          const colorAttribute = mathColor ? ` mathcolor="${escapeHtml(mathColor)}"` : "";
+          return {
+            html: `<mstyle${colorAttribute}>${parseLatexToMathMl(body.value)}</mstyle>`,
+            next: body.next
+          };
+        }
+      }
+
+      if (command === "mathcal") {
+        const group = readLatexGroup(text, next);
+        if (group) {
+          return {
+            html: renderMathcal(group.value),
+            next: group.next
+          };
+        }
+      }
+
       if (command === "frac") {
         const numerator = readLatexGroup(text, next);
         const denominator = numerator ? readLatexGroup(text, numerator.next) : null;
         if (numerator && denominator) {
           return {
-            html: `<mfrac>${parseLatexToMathMl(numerator.value)}${parseLatexToMathMl(denominator.value)}</mfrac>`,
+            html: `<mfrac>${mathMlGrouped(parseLatexToMathMl(numerator.value))}${mathMlGrouped(parseLatexToMathMl(denominator.value))}</mfrac>`,
             next: denominator.next
           };
         }
@@ -351,8 +446,28 @@
         const radicand = readLatexGroup(text, next);
         if (radicand) {
           return {
-            html: `<msqrt>${parseLatexToMathMl(radicand.value)}</msqrt>`,
+            html: `<msqrt>${mathMlGrouped(parseLatexToMathMl(radicand.value))}</msqrt>`,
             next: radicand.next
+          };
+        }
+      }
+
+      if (command === "underbrace") {
+        const base = readLatexGroup(text, next);
+        if (base) {
+          next = skipLatexWhitespace(text, base.next);
+          if (text[next] === "_") {
+            const annotationStart = skipLatexWhitespace(text, next + 1);
+            const annotation = parseLatexAtom(text, annotationStart);
+            return {
+              html: `<munder accentunder="false"><munder accentunder="true">${mathMlGrouped(parseLatexToMathMl(base.value))}<mo stretchy="true">&#x23DF;</mo></munder>${mathMlGrouped(annotation.html)}</munder>`,
+              next: annotation.next
+            };
+          }
+
+          return {
+            html: `<munder accentunder="true">${mathMlGrouped(parseLatexToMathMl(base.value))}<mo stretchy="true">&#x23DF;</mo></munder>`,
+            next: base.next
           };
         }
       }
@@ -376,26 +491,30 @@
     while (index < text.length) {
       let atom = parseLatexAtom(text, index);
       index = atom.next;
+      index = skipLatexWhitespace(text, index);
 
       if (text[index] === "_" || text[index] === "^") {
         const firstOperator = text[index];
-        const firstScript = parseLatexAtom(text, index + 1);
+        const firstScript = parseLatexAtom(text, skipLatexWhitespace(text, index + 1));
         index = firstScript.next;
+        index = skipLatexWhitespace(text, index);
 
         if (text[index] === "_" || text[index] === "^") {
           const secondOperator = text[index];
-          const secondScript = parseLatexAtom(text, index + 1);
+          const secondScript = parseLatexAtom(text, skipLatexWhitespace(text, index + 1));
           index = secondScript.next;
 
           const sub = firstOperator === "_" ? firstScript.html : secondScript.html;
           const sup = firstOperator === "^" ? firstScript.html : secondScript.html;
           atom = {
-            html: `<msubsup>${atom.html}${sub}${sup}</msubsup>`,
+            html: `<msubsup>${mathMlGrouped(atom.html)}${mathMlGrouped(sub)}${mathMlGrouped(sup)}</msubsup>`,
             next: index
           };
         } else {
           atom = {
-            html: firstOperator === "_" ? `<msub>${atom.html}${firstScript.html}</msub>` : `<msup>${atom.html}${firstScript.html}</msup>`,
+            html: firstOperator === "_" ?
+              `<msub>${mathMlGrouped(atom.html)}${mathMlGrouped(firstScript.html)}</msub>` :
+              `<msup>${mathMlGrouped(atom.html)}${mathMlGrouped(firstScript.html)}</msup>`,
             next: index
           };
         }
@@ -411,8 +530,36 @@
     const cleanLatex = stripLatexWrapper(latex);
     const wrappedLatex = wrapLatex(cleanLatex, block);
     const tag = block ? "div" : "span";
+    const renderId = `cgpt-latex-${latexRenderId += 1}`;
     const math = `<math xmlns="http://www.w3.org/1998/Math/MathML" display="${block ? "block" : "inline"}">${parseLatexToMathMl(cleanLatex)}</math>`;
-    return `<${tag} class="cgpt-user-math ${block ? "is-block" : "is-inline"}" data-latex="${escapeHtml(wrappedLatex)}">${math}</${tag}>`;
+    return `<${tag} class="cgpt-user-math ${block ? "is-block" : "is-inline"}" data-latex="${escapeHtml(wrappedLatex)}" data-cgpt-latex-raw="${escapeHtml(cleanLatex)}" data-cgpt-latex-block="${block ? "true" : "false"}" data-cgpt-page-render-id="${renderId}" data-cgpt-page-render-status="pending">${math}</${tag}>`;
+  }
+
+  function requestPageLatexRender(root) {
+    if (!(root instanceof Element)) return;
+
+    const formulas = root.querySelectorAll(".cgpt-user-math[data-cgpt-page-render-status='pending']");
+    for (const formula of formulas) {
+      if (!(formula instanceof HTMLElement)) continue;
+      const id = formula.dataset.cgptPageRenderId;
+      const latex = formula.dataset.cgptLatexRaw;
+      if (!id || !latex) continue;
+
+      formula.dataset.cgptPageRenderStatus = "requested";
+      window.dispatchEvent(new CustomEvent(PAGE_RENDER_REQUEST_EVENT, {
+        detail: {
+          id,
+          latex,
+          block: formula.dataset.cgptLatexBlock === "true"
+        }
+      }));
+
+      window.setTimeout(() => {
+        if (formula.dataset.cgptPageRenderStatus === "requested") {
+          formula.dataset.cgptPageRenderStatus = "fallback";
+        }
+      }, PAGE_RENDER_TIMEOUT_MS);
+    }
   }
 
   function renderInlineMathAndStyles(text) {
@@ -482,10 +629,74 @@
     return parts.join("");
   }
 
+  function findDisplayMathDelimiter(line, from = 0) {
+    let index = from;
+    while (index < line.length) {
+      const found = line.indexOf("$$", index);
+      if (found === -1) return -1;
+      if (found === 0 || line[found - 1] !== "\\") return found;
+      index = found + 2;
+    }
+    return -1;
+  }
+
+  function hasDisplayMathDelimiter(line) {
+    return findDisplayMathDelimiter(line) !== -1;
+  }
+
+  function renderDisplayMathLine(lines, index, blocks) {
+    const line = lines[index];
+    const start = findDisplayMathDelimiter(line);
+    if (start === -1) return null;
+
+    const before = line.slice(0, start).trimEnd();
+    const sameLineEnd = findDisplayMathDelimiter(line, start + 2);
+    let mathContent = "";
+    let trailing = "";
+    let endIndex = index;
+
+    if (sameLineEnd !== -1) {
+      mathContent = line.slice(start + 2, sameLineEnd);
+      trailing = line.slice(sameLineEnd + 2);
+    } else {
+      const mathLines = [line.slice(start + 2)];
+      let cursor = index + 1;
+      let foundEnd = false;
+
+      while (cursor < lines.length) {
+        const end = findDisplayMathDelimiter(lines[cursor]);
+        if (end !== -1) {
+          mathLines.push(lines[cursor].slice(0, end));
+          trailing = lines[cursor].slice(end + 2);
+          endIndex = cursor;
+          foundEnd = true;
+          break;
+        }
+        mathLines.push(lines[cursor]);
+        cursor += 1;
+      }
+
+      if (!foundEnd) return null;
+      mathContent = mathLines.join("\n");
+    }
+
+    if (before.trim()) {
+      blocks.push(renderMarkdown(before));
+    }
+    blocks.push(renderLatexMath(mathContent, true));
+
+    if (trailing.trim()) {
+      lines[endIndex] = trailing;
+      return endIndex;
+    }
+
+    return endIndex + 1;
+  }
+
   function isMarkdownBlockStart(line) {
     return (
       /^```/.test(line) ||
-      /^\$\$/.test(line) ||
+      hasDisplayMathDelimiter(line) ||
       /^#{1,6}\s+/.test(line) ||
       /^>\s?/.test(line) ||
       /^\s*[-*+]\s+/.test(line) ||
@@ -539,28 +750,9 @@
         continue;
       }
 
-      if (/^\$\$/.test(line)) {
-        const sameLineMath = line.match(/^\$\$\s*([\s\S]*?)\s*\$\$$/);
-        if (sameLineMath) {
-          blocks.push(renderLatexMath(sameLineMath[1], true));
-          index += 1;
-          continue;
-        }
-
-        if (/^\$\$\s*$/.test(line)) {
-          const mathLines = [];
-          index += 1;
-          while (index < lines.length && !/^\s*\$\$\s*$/.test(lines[index])) {
-            mathLines.push(lines[index]);
-            index += 1;
-          }
-          if (index < lines.length) index += 1;
-          blocks.push(renderLatexMath(mathLines.join("\n"), true));
-          continue;
-        }
-
-        blocks.push(`<p>${renderInlineMarkdown(line)}</p>`);
-        index += 1;
+      const displayMathNextIndex = renderDisplayMathLine(lines, index, blocks);
+      if (displayMathNextIndex !== null) {
+        index = displayMathNextIndex;
         continue;
       }
 
@@ -657,6 +849,7 @@
       target.classList.add("cgpt-user-markdown");
       try {
         target.innerHTML = renderMarkdown(source);
+        requestPageLatexRender(target);
       } catch (error) {
         target.textContent = source;
         target.dataset.cgptMarkdownRendered = "false";
@@ -908,10 +1101,12 @@
   function init() {
     storage.get(
       {
-        [STORAGE_KEY]: DEFAULT_PERCENT
+        [STORAGE_KEY]: DEFAULT_PERCENT,
+        [BACKGROUND_KEY]: DEFAULT_BACKGROUND
       },
       (items) => {
         setRootWidth(items[STORAGE_KEY]);
+        setPageBackground(items[BACKGROUND_KEY]);
         observePage();
         refreshChatWidths();
         refreshUserMarkdown();
@@ -955,9 +1150,34 @@
   window.addEventListener("copy", handleCopyWithLatex, true);
   document.addEventListener("copy", handleCopyWithLatex, true);
 
+  window.addEventListener(PAGE_RENDER_RESPONSE_EVENT, (event) => {
+    const detail = event.detail || {};
+    if (!detail.id) return;
+
+    const formula = document.querySelector(`[data-cgpt-page-render-id="${detail.id}"]`);
+    if (!(formula instanceof HTMLElement)) return;
+
+    if (detail.ok && typeof detail.html === "string" && detail.html.trim()) {
+      formula.innerHTML = detail.html;
+      formula.dataset.cgptPageRenderStatus = "rendered";
+      formula.dataset.cgptPageRenderer = detail.renderer || "page";
+      formula.classList.add("cgpt-user-math-page-rendered");
+      refreshLatexTargets([formula]);
+      return;
+    }
+
+    formula.dataset.cgptPageRenderStatus = "fallback";
+  });
+
   chrome.runtime.onMessage.addListener((message) => {
-    if (!message || message.type !== "CGPT_SET_WIDTH") return;
-    setRootWidth(message.value);
+    if (!message) return;
+    if (message.type === "CGPT_SET_WIDTH") {
+      setRootWidth(message.value);
+      return;
+    }
+    if (message.type === "CGPT_SET_BACKGROUND") {
+      setPageBackground(message.value);
+    }
   });
 
   init();

@@ -1,14 +1,23 @@
 {
   "manifest_version": 3,
   "name": "GPT Page Enhancer",
-  "description": "Enhance ChatGPT pages with adjustable content width, Markdown prompts, and click-to-copy LaTeX formulas.",
-  "version": "1.2.0",
+  "description": "Enhance ChatGPT pages with adjustable content width, page backgrounds, Markdown prompts, and click-to-copy LaTeX formulas.",
+  "version": "1.3.0",
   "permissions": ["storage", "activeTab"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*"
   ],
   "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["mainWorld.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
     {
       "matches": [
         "https://chatgpt.com/*",

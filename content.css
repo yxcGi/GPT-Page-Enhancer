@@ -2,6 +2,24 @@ html[data-cgpt-width-enabled="true"] {
   --cgpt-width: 72vw;
 }
 
+html[data-cgpt-background]:not([data-cgpt-background="default"]),
+html[data-cgpt-background]:not([data-cgpt-background="default"]) body,
+html[data-cgpt-background]:not([data-cgpt-background="default"]) main {
+  --main-surface-primary: var(--cgpt-page-background) !important;
+  --main-surface-secondary: var(--cgpt-page-background) !important;
+  --bg-primary: var(--cgpt-page-background) !important;
+  background: var(--cgpt-page-background) !important;
+}
+
+html[data-cgpt-background]:not([data-cgpt-background="default"]) main :is(
+  article,
+  [data-testid^="conversation-turn"],
+  [class*="bg-token-main-surface-primary"],
+  [class*="bg-token-main-surface-secondary"]
+) {
+  background-color: transparent !important;
+}
+
 html[data-cgpt-width-enabled="true"] main :is(
   .max-w-2xl,
   .max-w-3xl,

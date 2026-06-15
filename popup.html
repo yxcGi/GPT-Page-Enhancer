@@ -9,7 +9,7 @@
   <body>
     <main>
       <div class="header">
-        <h1>内容宽度</h1>
+        <h1>页面外观</h1>
         <output id="width-value">72%</output>
       </div>
       <input id="width-range" type="range" min="45" max="96" value="72" aria-label="ChatGPT 内容宽度百分比">
@@ -17,6 +17,17 @@
         <span>45%</span>
         <span>96%</span>
       </div>
+      <section class="setting-group" aria-labelledby="background-title">
+        <h2 id="background-title">背景颜色</h2>
+        <div class="swatches" role="radiogroup" aria-label="ChatGPT 页面背景颜色">
+          <button type="button" class="swatch is-default" data-background="default" role="radio" aria-checked="true" title="默认"></button>
+          <button type="button" class="swatch" data-background="warm" role="radio" aria-checked="false" title="暖白"></button>
+          <button type="button" class="swatch" data-background="mint" role="radio" aria-checked="false" title="浅绿"></button>
+          <button type="button" class="swatch" data-background="blue" role="radio" aria-checked="false" title="浅蓝"></button>
+          <button type="button" class="swatch" data-background="gray" role="radio" aria-checked="false" title="浅灰"></button>
+          <button type="button" class="swatch" data-background="rose" role="radio" aria-checked="false" title="浅粉"></button>
+        </div>
+      </section>
     </main>
     <script src="popup.js"></script>
   </body>
