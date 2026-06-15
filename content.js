@@ -3,19 +3,14 @@
   const MIN_PERCENT = 45;
   const MAX_PERCENT = 96;
   const STORAGE_KEY = "chatgptContentWidthPercent";
-  const COLLAPSED_KEY = "chatgptWidthSliderCollapsed";
-  const PANEL_POSITION_KEY = "chatgptEnhancerPanelPosition";
-  const PANEL_MARGIN = 12;
+  const CONTENT_SIDE_GAP = 32;
   const FORMULA_SELECTOR = ".katex-display, .katex, .MathJax, mjx-container, [data-latex]";
   const USER_MESSAGE_SELECTOR = "[data-message-author-role='user']";
   const MAX_MARKDOWN_SOURCE_LENGTH = 20000;
 
   let widthPercent = DEFAULT_PERCENT;
-  let collapsed = false;
-  let panelPosition = null;
   let observer = null;
   let refreshTimer = null;
-  let widthStorageTimer = null;
   let pendingFullRefresh = false;
   const dirtyRefreshRoots = new Set();
 
@@ -27,75 +22,31 @@
     return Math.min(MAX_PERCENT, Math.max(MIN_PERCENT, Math.round(number)));
   }
 
+  function getReferenceViewportWidth() {
+    const widths = [
+      window.screen && window.screen.availWidth,
+      window.screen && window.screen.width,
+      window.outerWidth,
+      window.innerWidth
+    ].filter((value) => Number.isFinite(value) && value > 0);
+
+    return widths.length ? Math.max(...widths) : window.innerWidth;
+  }
+
+  function getContentWidthCssValue(percent) {
+    const referenceWidth = getReferenceViewportWidth();
+    const desiredWidth = Math.round(referenceWidth * clamp(percent) / 100);
+    const availableWidth = Math.max(0, window.innerWidth - CONTENT_SIDE_GAP);
+
+    return desiredWidth <= availableWidth ? `${desiredWidth}px` : `calc(100vw - ${CONTENT_SIDE_GAP}px)`;
+  }
+
   function setRootWidth(value) {
     widthPercent = clamp(value);
+    const widthValue = getContentWidthCssValue(widthPercent);
     document.documentElement.dataset.cgptWidthEnabled = "true";
-    document.documentElement.style.setProperty("--cgpt-width", `${widthPercent}vw`);
-    document.documentElement.style.setProperty("--thread-content-max-width", `${widthPercent}vw`);
-    updatePanelValue();
-  }
-
-  function persistWidthSoon() {
-    window.clearTimeout(widthStorageTimer);
-    widthStorageTimer = window.setTimeout(() => {
-      storage.set({ [STORAGE_KEY]: widthPercent });
-    }, 180);
-  }
-
-  function persistWidthNow() {
-    window.clearTimeout(widthStorageTimer);
-    storage.set({ [STORAGE_KEY]: widthPercent });
-  }
-
-  function saveWidth(value) {
-    setRootWidth(value);
-    persistWidthSoon();
-  }
-
-  function clampPanelPosition(left, top, panel) {
-    const width = panel.offsetWidth || 320;
-    const height = panel.offsetHeight || 72;
-    const maxLeft = Math.max(PANEL_MARGIN, window.innerWidth - width - PANEL_MARGIN);
-    const maxTop = Math.max(PANEL_MARGIN, window.innerHeight - height - PANEL_MARGIN);
-    return {
-      left: Math.min(maxLeft, Math.max(PANEL_MARGIN, Math.round(left))),
-      top: Math.min(maxTop, Math.max(PANEL_MARGIN, Math.round(top)))
-    };
-  }
-
-  function applyPanelPosition(panel, position) {
-    const nextPosition = position || {
-      left: window.innerWidth - panel.offsetWidth - 20,
-      top: window.innerHeight - panel.offsetHeight - 92
-    };
-    panelPosition = clampPanelPosition(nextPosition.left, nextPosition.top, panel);
-    panel.style.left = `${panelPosition.left}px`;
-    panel.style.top = `${panelPosition.top}px`;
-  }
-
-  function repositionAfterPanelSizeChange(panel, previousRect) {
-    const shouldAnchorRight = previousRect.left + previousRect.width / 2 > window.innerWidth / 2;
-    const right = window.innerWidth - previousRect.right;
-    const nextLeft = shouldAnchorRight ? window.innerWidth - right - panel.offsetWidth : previousRect.left;
-    const next = clampPanelPosition(nextLeft, previousRect.top, panel);
-    panel.style.left = `${next.left}px`;
-    panel.style.top = `${next.top}px`;
-    panelPosition = next;
-    storage.set({ [PANEL_POSITION_KEY]: panelPosition });
-  }
-
-  function savePanelPosition(panel) {
-    panelPosition = clampPanelPosition(panel.offsetLeft, panel.offsetTop, panel);
-    panel.style.left = `${panelPosition.left}px`;
-    panel.style.top = `${panelPosition.top}px`;
-    storage.set({ [PANEL_POSITION_KEY]: panelPosition });
-  }
-
-  function updatePanelValue() {
-    const range = document.getElementById("cgpt-width-range");
-    const value = document.querySelector(".cgpt-width-value");
-    if (range) range.value = String(widthPercent);
-    if (value) value.textContent = `${widthPercent}%`;
+    document.documentElement.style.setProperty("--cgpt-width", widthValue);
+    document.documentElement.style.setProperty("--thread-content-max-width", widthValue);
   }
 
   function isChatSurfaceElement(element) {
@@ -890,7 +841,7 @@
     return Boolean(
       element &&
       element.closest &&
-      element.closest("#cgpt-width-slider-panel, .cgpt-copy-toast")
+      element.closest(".cgpt-copy-toast")
     );
   }
 
@@ -942,92 +893,6 @@
     }, 80);
   }
 
-  function createPanel() {
-    if (document.getElementById("cgpt-width-slider-panel")) return;
-
-    const panel = document.createElement("div");
-    panel.id = "cgpt-width-slider-panel";
-    panel.dataset.collapsed = String(collapsed);
-    panel.innerHTML = `
-      <button type="button" class="cgpt-panel-handle" title="拖动面板；点击收起或展开" aria-label="拖动面板；点击收起或展开">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M5 19L16.5 7.5" />
-          <path d="M14.5 5.5l4 4" />
-          <path d="M7 4.5v3M5.5 6h3" />
-          <path d="M18 15.5v3M16.5 17h3" />
-          <path d="M11 3.5l.7 1.4 1.3.6-1.3.6-.7 1.4-.7-1.4L9 5.5l1.3-.6.7-1.4z" />
-        </svg>
-      </button>
-      <div class="cgpt-width-body">
-        <div class="cgpt-width-label">
-          <span>内容宽度</span>
-          <span class="cgpt-width-value">${widthPercent}%</span>
-        </div>
-        <input id="cgpt-width-range" type="range" min="${MIN_PERCENT}" max="${MAX_PERCENT}" value="${widthPercent}" aria-label="ChatGPT 内容宽度百分比">
-      </div>
-    `;
-
-    const handle = panel.querySelector(".cgpt-panel-handle");
-    let drag = null;
-
-    handle.addEventListener("pointerdown", (event) => {
-      drag = {
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startY: event.clientY,
-        left: panel.offsetLeft,
-        top: panel.offsetTop,
-        moved: false
-      };
-      handle.setPointerCapture(event.pointerId);
-      panel.dataset.dragging = "true";
-    });
-
-    handle.addEventListener("pointermove", (event) => {
-      if (!drag || drag.pointerId !== event.pointerId) return;
-      const dx = event.clientX - drag.startX;
-      const dy = event.clientY - drag.startY;
-      if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
-      const next = clampPanelPosition(drag.left + dx, drag.top + dy, panel);
-      panel.style.left = `${next.left}px`;
-      panel.style.top = `${next.top}px`;
-    });
-
-    handle.addEventListener("pointerup", (event) => {
-      if (!drag || drag.pointerId !== event.pointerId) return;
-      handle.releasePointerCapture(event.pointerId);
-      panel.dataset.dragging = "false";
-      if (drag.moved) {
-        savePanelPosition(panel);
-      } else {
-        const previousRect = panel.getBoundingClientRect();
-        collapsed = !collapsed;
-        panel.dataset.collapsed = String(collapsed);
-        storage.set({ [COLLAPSED_KEY]: collapsed });
-        window.requestAnimationFrame(() => repositionAfterPanelSizeChange(panel, previousRect));
-      }
-      drag = null;
-    });
-
-    handle.addEventListener("pointercancel", (event) => {
-      if (!drag || drag.pointerId !== event.pointerId) return;
-      panel.dataset.dragging = "false";
-      drag = null;
-    });
-
-    panel.querySelector("#cgpt-width-range").addEventListener("input", (event) => {
-      saveWidth(event.target.value);
-    });
-    panel.querySelector("#cgpt-width-range").addEventListener("change", (event) => {
-      setRootWidth(event.target.value);
-      persistWidthNow();
-    });
-
-    document.documentElement.appendChild(panel);
-    window.requestAnimationFrame(() => applyPanelPosition(panel, panelPosition));
-    window.addEventListener("resize", () => applyPanelPosition(panel, panelPosition));
-  }
-
   function observePage() {
     if (observer) observer.disconnect();
     observer = new MutationObserver((mutations) => {
@@ -1043,15 +908,10 @@
   function init() {
     storage.get(
       {
-        [STORAGE_KEY]: DEFAULT_PERCENT,
-        [COLLAPSED_KEY]: false,
-        [PANEL_POSITION_KEY]: null
+        [STORAGE_KEY]: DEFAULT_PERCENT
       },
       (items) => {
-        collapsed = Boolean(items[COLLAPSED_KEY]);
-        panelPosition = items[PANEL_POSITION_KEY];
         setRootWidth(items[STORAGE_KEY]);
-        createPanel();
         observePage();
         refreshChatWidths();
         refreshUserMarkdown();
@@ -1059,6 +919,10 @@
       }
     );
   }
+
+  window.addEventListener("resize", () => {
+    setRootWidth(widthPercent);
+  });
 
   document.addEventListener("click", async (event) => {
     const latex = getLatexFromElement(event.target);
