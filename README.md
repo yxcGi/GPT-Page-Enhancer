@@ -10,6 +10,7 @@ GPT Page Enhancer 是一个面向 ChatGPT 网页的 Chrome 扩展，用来改善
 - 通过浏览器工具栏中的扩展按钮设置内容宽度，范围为 `45%` 到 `96%`。
 - 提供多种页面背景颜色选项。
 - 将已经发送出去的提问按 Markdown 形式显示。
+- 使用内置 KaTeX 渲染提问中的 LaTeX 公式，支持复杂分式、上下标、颜色、加粗、下大括号等常用语法。
 - 点击页面中的公式可直接复制完整 LaTeX，自动保留 `$...$` 或 `$$...$$` 包裹符号。
 - 复制同时包含文字和公式的选区时，会尽量将选区内的完整公式转换为 LaTeX。
 
@@ -43,7 +44,7 @@ GPT Page Enhancer 是一个面向 ChatGPT 网页的 Chrome 扩展，用来改善
 
 ### Markdown 提问显示
 
-发送出去的提问会按 Markdown 渲染，支持标题、列表、引用、代码块、行内代码、粗体、斜体和链接等常用格式。
+发送出去的提问会按 Markdown 渲染，支持标题、列表、引用、代码块、行内代码、粗体、斜体、链接和 LaTeX 公式等常用格式。
 
 ### 复制公式
 
@@ -67,6 +68,7 @@ GPT Page Enhancer 是一个面向 ChatGPT 网页的 Chrome 扩展，用来改善
 - `content.js`：页面增强、宽度控制、公式复制逻辑。
 - `content.css`：ChatGPT 页面注入样式。
 - `popup.html` / `popup.css` / `popup.js`：浏览器工具栏弹窗。
+- `vendor/katex/`：内置 KaTeX 渲染资源。
 
 ## 已知限制
 
