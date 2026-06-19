@@ -177,7 +177,6 @@
       (formula.matches(".MathJax, mjx-container") ? formula.getAttribute("aria-label") : "");
 
     if (!rawLatex || !rawLatex.trim()) {
-      formulaLatexCache.set(formula, null);
       return null;
     }
 
@@ -199,8 +198,8 @@
     const element = node instanceof Element ? node : node.parentElement;
     if (!element) return null;
     return (
-      element.closest(".katex") ||
       element.closest(".katex-display") ||
+      element.closest(".katex") ||
       element.closest(".MathJax") ||
       element.closest("mjx-container") ||
       element.closest("[data-latex]")
@@ -267,10 +266,11 @@
   }
 
   function refreshLatexTargets(roots) {
-    for (const formula of collectScopedElements(roots, ".katex, .MathJax, mjx-container, [data-latex]")) {
+    for (const formula of collectScopedElements(roots, ".katex-display, .katex, .MathJax, mjx-container, [data-latex]")) {
       if (!(formula instanceof HTMLElement)) continue;
       if (!isChatSurfaceElement(formula)) continue;
       if (formula.classList.contains("cgpt-latex-copy-target")) continue;
+      if (formula.matches(".katex") && formula.closest(".katex-display")) continue;
       if (!getLatexFromFormula(formula)) continue;
       formula.classList.add("cgpt-latex-copy-target");
       formula.title = "点击复制完整 LaTeX";
