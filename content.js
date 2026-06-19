@@ -118,8 +118,7 @@
     const inlineMaxWidth = element.style && element.style.maxWidth;
     return (
       /\bmax-w-/.test(className) ||
-      inlineMaxWidth.includes("rem") ||
-      inlineMaxWidth.includes("px")
+      (Boolean(inlineMaxWidth) && (inlineMaxWidth.includes("rem") || inlineMaxWidth.includes("px")))
     );
   }
 
@@ -1128,6 +1127,13 @@
     }
   }
 
+  const scheduleIdle = typeof window.requestIdleCallback === "function"
+    ? (fn) => window.requestIdleCallback(fn, { timeout: 200 })
+    : (fn) => window.setTimeout(fn, 80);
+  const cancelIdle = typeof window.cancelIdleCallback === "function"
+    ? window.cancelIdleCallback.bind(window)
+    : window.clearTimeout.bind(window);
+
   function scheduleRefresh(options = {}) {
     if (options.full) {
       pendingFullRefresh = true;
@@ -1138,9 +1144,9 @@
       }
     }
 
-    window.clearTimeout(refreshTimer);
-    refreshTimer = window.setTimeout(() => {
-      const roots = pendingFullRefresh ? null : Array.from(dirtyRefreshRoots).filter((root) => root.isConnected !== false);
+    cancelIdle(refreshTimer);
+    refreshTimer = scheduleIdle(() => {
+      const roots = pendingFullRefresh ? null : Array.from(dirtyRefreshRoots).filter((root) => root instanceof Element && root.isConnected);
       pendingFullRefresh = false;
       dirtyRefreshRoots.clear();
 
@@ -1148,7 +1154,7 @@
       refreshChatWidths(roots);
       refreshUserMarkdown(roots);
       refreshLatexTargets(roots);
-    }, 80);
+    });
   }
 
   function observePage() {

@@ -72,14 +72,14 @@ storage.get({ [STORAGE_KEY]: DEFAULT_PERCENT, [BACKGROUND_KEY]: DEFAULT_BACKGROU
 });
 
 range.addEventListener("input", () => {
-  const percent = Number(range.value);
+  const percent = Math.round(Number(range.value));
   updateDisplay(percent);
   saveWidth(percent);
   queueWidthMessage(percent);
 });
 
 range.addEventListener("change", () => {
-  const percent = Number(range.value);
+  const percent = Math.round(Number(range.value));
   clearTimeout(widthStorageTimer);
   if (widthMessageFrame) {
     cancelAnimationFrame(widthMessageFrame);

@@ -38,14 +38,14 @@
       const katexHtml = renderWithKatex(latex, block);
       if (katexHtml) return { ok: true, renderer: "katex", html: katexHtml };
     } catch (error) {
-      // Try the next renderer.
+      console.debug("[GPT Enhancer] KaTeX render failed:", error);
     }
 
     try {
       const mathJaxHtml = renderWithMathJax(latex, block);
       if (mathJaxHtml) return { ok: true, renderer: "mathjax", html: mathJaxHtml };
     } catch (error) {
-      // Fall through to the content-script fallback renderer.
+      console.debug("[GPT Enhancer] MathJax render failed:", error);
     }
 
     return { ok: false, renderer: "", html: "" };
