@@ -1198,18 +1198,44 @@
     });
   });
 
+  function getFormulaLineScope(formula) {
+    const block = formula.closest("p, li, dd, dt, blockquote, h1, h2, h3, h4, h5, h6, td, th");
+    return block && isChatSurfaceElement(block) ? block : null;
+  }
+
+  function getClickCopyPayload(target) {
+    const formula = resolveFormulaElement(
+      target instanceof Element ? target : target && target.parentElement
+    );
+    if (!formula) return null;
+
+    const single = getLatexFromFormula(formula);
+    if (!single) return null;
+
+    const scope = getFormulaLineScope(formula);
+    if (scope) {
+      const state = { hasFormula: false, seenFormulas: new Set() };
+      const lineText = normalizeCopiedText(serializeClonedNode(scope, state));
+      if (state.hasFormula && lineText && lineText !== single.text) {
+        return { text: lineText, element: scope };
+      }
+    }
+
+    return { text: single.text, element: single.element };
+  }
+
   document.addEventListener("click", async (event) => {
-    const latex = getLatexFromElement(event.target);
-    if (!latex) return;
+    const payload = getClickCopyPayload(event.target);
+    if (!payload) return;
 
     event.preventDefault();
     event.stopPropagation();
 
     try {
-      await copyText(latex.text);
-      showCopyFeedback(latex.element, true);
+      await copyText(payload.text);
+      showCopyFeedback(payload.element, true);
     } catch (error) {
-      showCopyFeedback(latex.element, false);
+      showCopyFeedback(payload.element, false);
     }
   }, true);
 
