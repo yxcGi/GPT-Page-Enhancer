@@ -48,6 +48,7 @@
   let refreshTimer = null;
   let resizeFrame = null;
   let pendingFullRefresh = false;
+  let lastLocationHref = "";
   const dirtyRefreshRoots = new Set();
   const pendingPageRenderElements = new Set();
   const pageRenderElements = new Map();
@@ -1159,10 +1160,17 @@
 
   function observePage() {
     const root = document.querySelector("main") || document.body || document.documentElement;
-    if (observer && observedRoot === root) return;
+    if (observer && observedRoot === root && root.isConnected) return;
     if (observer) observer.disconnect();
     observedRoot = root;
     observer = new MutationObserver((mutations) => {
+      // SPA navigation can replace <main>, detaching the observed root. Re-attach
+      // to the live element before processing so new conversations stay covered.
+      if (!observedRoot.isConnected) {
+        observePage();
+        scheduleRefresh({ full: true });
+        return;
+      }
       queueMutationRoots(mutations);
       if (dirtyRefreshRoots.size) scheduleRefresh();
     });
@@ -1170,6 +1178,44 @@
       childList: true,
       subtree: true
     });
+  }
+
+  // ChatGPT is a SPA: opening a new conversation changes the URL and remounts
+  // <main> without a full page load. Without this watcher the observer stays
+  // bound to the stale <main>, so the first message in a new chat is never
+  // processed (no width fix, no formula hover/copy). Re-attach on every route
+  // change and force a full refresh; the delayed passes catch DOM that the
+  // route change streams in asynchronously.
+  function handleLocationChange() {
+    if (location.href === lastLocationHref) return;
+    lastLocationHref = location.href;
+    observePage();
+    scheduleRefresh({ full: true });
+    for (const delay of [200, 600, 1200]) {
+      window.setTimeout(() => {
+        observePage();
+        scheduleRefresh({ full: true });
+      }, delay);
+    }
+  }
+
+  function setupLocationWatcher() {
+    lastLocationHref = location.href;
+    // We run in the isolated world, so monkey-patching history.pushState here
+    // would NOT intercept ChatGPT's own (main-world) navigation calls. popstate
+    // only covers back/forward, and opening a new chat uses pushState. So poll
+    // location.href — and re-attach if the observed <main> got detached — to
+    // reliably catch SPA navigation regardless of how it was triggered.
+    window.setInterval(() => {
+      if (location.href !== lastLocationHref) {
+        handleLocationChange();
+      } else if (observedRoot && !observedRoot.isConnected) {
+        observePage();
+        scheduleRefresh({ full: true });
+      }
+    }, 500);
+    window.addEventListener("popstate", handleLocationChange);
+    window.addEventListener("hashchange", handleLocationChange);
   }
 
   function init() {
@@ -1183,6 +1229,7 @@
         setPageBackground(items[BACKGROUND_KEY]);
         probePageRenderer();
         observePage();
+        setupLocationWatcher();
         refreshChatWidths();
         refreshUserMarkdown();
         refreshLatexTargets();
