@@ -1245,11 +1245,6 @@
     });
   });
 
-  function getFormulaLineScope(formula) {
-    const block = formula.closest("p, li, dd, dt, blockquote, h1, h2, h3, h4, h5, h6, td, th");
-    return block && isChatSurfaceElement(block) ? block : null;
-  }
-
   function getClickCopyPayload(target) {
     const formula = resolveFormulaElement(
       target instanceof Element ? target : target && target.parentElement
@@ -1258,15 +1253,6 @@
 
     const single = getLatexFromFormula(formula);
     if (!single) return null;
-
-    const scope = getFormulaLineScope(formula);
-    if (scope) {
-      const state = { hasFormula: false, seenFormulas: new Set() };
-      const lineText = normalizeCopiedText(serializeClonedNode(scope, state));
-      if (state.hasFormula && lineText && lineText !== single.text) {
-        return { text: lineText, element: scope };
-      }
-    }
 
     return { text: single.text, element: single.element };
   }
